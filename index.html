@@ -228,9 +228,24 @@ document.addEventListener("touchend", (e) => {
 }, { passive: false });
 
 // ===== 1. 面(レベル)の自動生成 =====
-// 「必ずクリアできる面」を作るため、まず正解ルートをランダムに歩いて作り、
-// そのルートが通ったマスだけを盤面にする。ルートの最初がスタート、
-// 最後がゴールになるので、その通りになぞれば必ずクリアできる。
+//
+// 方針転換(今回の変更): 「壁」を見せる迷路方式は、実際に触ってもらうと
+// 「壁沿いに進めば簡単に解けてしまう」と分かった。これは、迷路の通路が
+// 木の枝のように分かれているだけだと、「常に同じ側の壁に手を触れたまま
+// 進む」という機械的なやり方(壁づたい法)だけで、考えなくても大部分を
+// 解けてしまうため。またご指摘の通り、壁を表示する見た目自体も好みでは
+// なかった。そこで、壁を使わない「盤面の一部だけをマスにする」方式に戻す。
+// その上で、これまでの反省点を両方とも直す。
+//   ・盤面のマスが斜めに帯状に偏る問題 → 完全には消せないが、後述の
+//     「機械的な解き方が通用するか」を実際にシミュレーションして確かめ、
+//     通用してしまう盤面は選ばないようにする
+//   ・壁づたい法で簡単に解けてしまう問題 → 「壁づたい法」や「まっすぐ
+//     進めるところは曲がらない」といった、人がよくやる機械的な解き方を
+//     実際にコンピューター上でシミュレーションし、それで解けてしまう盤面は
+//     不採用にする
+// 難易度の作り方の基本は変わらず、①一度も同じマスを通らない正解ルートを
+// 1本作り、②そのルートが通ったマスだけを盤面にする(=必ず解けることが
+// 保証される)、③大きな「四角い部屋」ができないようにする、というもの。
 
 // r行c列の、上下左右の隣マスの一覧(盤面の外は含めない)
 function neighborsOf(r, c, rows, cols) {
@@ -251,6 +266,26 @@ function shuffle(arr) {
   return arr;
 }
 
+// 「新しいマスを1つ足したときに、2×2マスがまるごと通路になってしまうか」を調べる。
+// これが起きると、通路が広い「部屋」のようになってしまい、
+// どちらに進んでも大差ない=簡単に解けてしまう原因になる。
+function makesOpenBlock(r, c, visited) {
+  const offsets = [
+    [[0, 0], [0, 1], [1, 0], [1, 1]],
+    [[0, -1], [0, 0], [1, -1], [1, 0]],
+    [[-1, 0], [-1, 1], [0, 0], [0, 1]],
+    [[-1, -1], [-1, 0], [0, -1], [0, 0]]
+  ];
+  for (const win of offsets) {
+    const allFilled = win.every(([dr, dc]) => {
+      if (dr === 0 && dc === 0) return true;
+      return visited.has((r + dr) + "," + (c + dc));
+    });
+    if (allFilled) return true;
+  }
+  return false;
+}
+
 // rows×cols の枠の中で、targetLength個のマスを通る、
 // 一度も同じマスを通らないルートを1本作る。
 // (行き止まりになったら1マス戻ってやり直す「バックトラック」という方法)
@@ -263,23 +298,33 @@ function tryBuildRoute(rows, cols, targetLength) {
   visited.add(startR + "," + startC);
 
   let steps = 0;
-  const STEP_LIMIT = 30000;  // 粘りすぎて固まらないようにする上限
+  const STEP_LIMIT = 60000;  // 粘りすぎて固まらないようにする上限
 
   function extend() {
     if (route.length === targetLength) return true;
     if (steps++ > STEP_LIMIT) return false;
 
     const last = route[route.length - 1];
+
     let candidates = neighborsOf(last.r, last.c, rows, cols)
       .filter(([r, c]) => !visited.has(r + "," + c));
 
-    // 行き止まりになりにくい候補(この先の逃げ道が少ないマス)を先に試す
     candidates = shuffle(candidates).map(([r, c]) => {
       const freeExits = neighborsOf(r, c, rows, cols)
         .filter(([nr, nc]) => !visited.has(nr + "," + nc)).length;
-      return { r, c, freeExits };
+      const opensBlock = makesOpenBlock(r, c, visited);
+      // 出口がゼロの候補だけ「危険」扱いにする(それ以外は出口の数で差をつけない)
+      const deadEndRisk = freeExits === 0 ? 1 : 0;
+      return { r, c, freeExits, opensBlock, deadEndRisk };
     });
-    candidates.sort((a, b) => a.freeExits - b.freeExits);
+
+    // 優先順位: ①部屋を作らない ②手詰まり確定を避ける、の順で選ぶ
+    // (それ以外はシャッフルされた順のまま=枝分かれの余地を残す)
+    candidates.sort((a, b) => {
+      if (a.opensBlock !== b.opensBlock) return a.opensBlock ? 1 : -1;
+      if (a.deadEndRisk !== b.deadEndRisk) return a.deadEndRisk - b.deadEndRisk;
+      return 0;
+    });
 
     for (const cand of candidates) {
       const k = cand.r + "," + cand.c;
@@ -305,27 +350,127 @@ function buildRoute(rows, cols, targetLength) {
   return tryBuildRoute(rows, cols, Math.max(6, Math.floor(targetLength * 0.7)));
 }
 
-// レベルの数字から、盤面の大きさと、通るマス数の目安を決める
-// ・序盤(〜lv3):    4×4くらいで、穴なし
-// ・中盤(〜lv25):   盤面が10×10まで大きくなりながら、穴の割合を増やしていく
-//                   (すき間なく敷き詰めると正解ルートが「実質1本道」になり
-//                    難しくなりすぎるため、穴の割合が72%を下回らないようにする)
-// ・終盤(lv26〜):   盤面の大きさは10×10で止め、代わりに穴を少しずつ減らして
-//                   (=すき間を減らして)いき、レベルが上がってもずっと
-//                   手応えが続くようにする(90%までで、完全な1本道にはしない)
+// レベルの数字から、盤面の大きさと、通るマス数の目安を決める。
+// 詰め込みすぎると大きな「部屋」ができてしまうため、穴の割合はいつも
+// 45〜51%あたりに保ち、代わりに盤面の大きさを4×4→13×13まで
+// しっかり大きくしていくことで、難しさを積み上げていく。
 function levelConfig(lv) {
-  const size = Math.min(4 + Math.floor((lv - 1) / 4), 10);  // 4→10まで、4レベルごとに1つ大きく
+  const size = Math.min(4 + Math.floor((lv - 1) / 2), 13);  // 4→13まで、2レベルごとに1つ大きく
   const maxCells = size * size;
   let fillRatio;
-  if (lv <= 3) {
+  if (lv <= 2) {
     fillRatio = 1;
-  } else if (lv <= 25) {
-    fillRatio = Math.max(0.72, 1 - 0.06 * (lv - 3));
+  } else if (lv <= 20) {
+    fillRatio = Math.max(0.45, 1 - 0.09 * (lv - 2));
   } else {
-    fillRatio = Math.min(0.9, 0.72 + 0.004 * (lv - 25));
+    fillRatio = Math.min(0.51, 0.45 + 0.002 * (lv - 20));
   }
   const targetLength = Math.max(Math.round(maxCells * fillRatio), 6);
   return { rows: size, cols: size, targetLength };
+}
+
+// ===== 難易度の測定と、盤面の選びなおし =====
+// できあがった盤面そのものを、実際にどれくらい「考えないと解けない」ものに
+// なっているか測って、レベルにふさわしい盤面を選ぶ。
+
+// 盤面の中の各マスについて、「通れる方向が3つ以上ある(=分かれ道になっている)」
+// マスの割合を求める。
+function branchRatioOf(route, rows, cols) {
+  const region = new Set(route.map(p => p.r + "," + p.c));
+  let branchCount = 0;
+  for (const p of route) {
+    const deg = neighborsOf(p.r, p.c, rows, cols)
+      .filter(([r, c]) => region.has(r + "," + c)).length;
+    if (deg >= 3) branchCount++;
+  }
+  return branchCount / route.length;
+}
+
+// 「先読みをせず、行けるマスにランダムに進むだけで、何%の確率で最後まで
+// (全マスを通ってゴールに)たどり着けるか」をたくさん試して測る。
+function simulateNaiveSuccess(route, rows, cols, trials) {
+  const region = new Set(route.map(p => p.r + "," + p.c));
+  const startCell = route[0];
+  const goalCell = route[route.length - 1];
+  const total = route.length;
+  let successes = 0;
+  for (let t = 0; t < trials; t++) {
+    const visited = new Set([startCell.r + "," + startCell.c]);
+    let cr = startCell.r, cc = startCell.c;
+    let steps = 1;
+    while (steps < total) {
+      const next = neighborsOf(cr, cc, rows, cols)
+        .filter(([r, c]) => region.has(r + "," + c) && !visited.has(r + "," + c));
+      if (next.length === 0) break;
+      const [nr, nc] = next[Math.floor(Math.random() * next.length)];
+      visited.add(nr + "," + nc);
+      cr = nr; cc = nc;
+      steps++;
+    }
+    if (steps === total && cr === goalCell.r && cc === goalCell.c) successes++;
+  }
+  return successes / trials;
+}
+
+// ===== 「機械的な解き方」で解けてしまわないかのチェック =====
+// 人がよく無意識にやってしまう、2つの単純な解き方をシミュレーションする。
+//   ①壁づたい法: 右手(または左手)を壁につけたまま進み続ける、迷路の定番の解き方
+//   ②直進優先法: 曲がれる場所でも、まっすぐ進めるならまっすぐ進む
+// これらの「何も考えていない」解き方で最後まで解けてしまう盤面は、
+// たとえ分かれ道の数が多くても実質簡単なので、候補から外す。
+const DIRS4 = [[-1, 0], [0, 1], [1, 0], [0, -1]];  // 上, 右, 下, 左の順(時計回り)
+
+function simulateMechanicalSolve(route, rows, cols, mode) {
+  const region = new Set(route.map(p => p.r + "," + p.c));
+  const startCell = route[0];
+  const goalCell = route[route.length - 1];
+  const total = route.length;
+  const visited = new Set([startCell.r + "," + startCell.c]);
+  let cr = startCell.r, cc = startCell.c;
+  let facing = 1;  // 最初は右向きと仮定
+  let steps = 1;
+
+  // mode: "wallRight"(右手法) / "wallLeft"(左手法) / "straight"(直進優先)
+  const order = mode === "wallRight" ? [1, 0, 3, 2]   // 右折,直進,左折,後退 の相対オフセット
+    : mode === "wallLeft" ? [3, 0, 1, 2]              // 左折,直進,右折,後退
+      : [0, 1, 3, 2];                                  // 直進,右折,左折,後退
+
+  while (steps < total) {
+    let moved = false;
+    for (const off of order) {
+      const d = (facing + off) % 4;
+      const [dr, dc] = DIRS4[d];
+      const nr = cr + dr, nc = cc + dc;
+      const k = nr + "," + nc;
+      if (!region.has(k) || visited.has(k)) continue;
+      cr = nr; cc = nc; facing = d;
+      visited.add(k);
+      steps++;
+      moved = true;
+      break;
+    }
+    if (!moved) break;  // 進めなくなった(手詰まり)
+  }
+  return steps === total && cr === goalCell.r && cc === goalCell.c;
+}
+
+// 上の3通りのどれか1つでも解けてしまうなら「機械的に解ける」とみなす
+function isMechanicallySolvable(route, rows, cols) {
+  return simulateMechanicalSolve(route, rows, cols, "wallRight")
+    || simulateMechanicalSolve(route, rows, cols, "wallLeft")
+    || simulateMechanicalSolve(route, rows, cols, "straight");
+}
+
+// レベルが上がるほど、「行き当たりばったりで成功する確率」の目標値を
+// 下げていく(=より深く考えないと解けない盤面を目指す)。
+function targetDifficulty(lv) {
+  if (lv <= 3) return 0.9;
+  return Math.max(0.05, 0.9 - 0.045 * (lv - 3));
+}
+
+// 何個の候補を作って比べるか。多いほど良い盤面が選べるが、時間もかかる。
+function candidateCountFor(lv) {
+  return lv <= 5 ? 4 : 6;
 }
 
 // レベルに応じた盤面を1面ぶん作る
@@ -337,7 +482,40 @@ let goal = null;
 
 function generateLevel(lv) {
   const cfg = levelConfig(lv);
-  const route = buildRoute(cfg.rows, cfg.cols, cfg.targetLength);
+  const target = targetDifficulty(lv);
+  const numCandidates = candidateCountFor(lv);
+  const SIM_TRIALS = 25;          // 候補を比べるための試行回数(多すぎると遅くなる)
+  const TIME_BUDGET_MS = 300;     // 盤面選びに使ってよい時間の目安
+
+  const startTime = Date.now();
+  let best = null;
+  let bestScore = -Infinity;
+
+  for (let i = 0; i < numCandidates; i++) {
+    // 1個目は必ず作る。2個目以降は、時間をかけすぎていたら打ち切る。
+    if (i > 0 && Date.now() - startTime > TIME_BUDGET_MS) break;
+
+    const route = buildRoute(cfg.rows, cfg.cols, cfg.targetLength);
+    if (!route) continue;
+
+    const branchRatio = branchRatioOf(route, cfg.rows, cfg.cols);
+    const naiveRate = simulateNaiveSuccess(route, cfg.rows, cfg.cols, SIM_TRIALS);
+    const easyPenalty = naiveRate > target ? (naiveRate - target) * 3 : 0;
+    // レベル4以降で、壁づたい法などの機械的な解き方が通用してしまう盤面は、
+    // 分かれ道が多く見えても大きく減点して避ける(レベル1〜3はごく小さい
+    // 盤面で、機械的に解けても問題にならないためチェックを省く)。
+    const mechanicalPenalty = (lv > 3 && isMechanicallySolvable(route, cfg.rows, cfg.cols)) ? 5 : 0;
+    const score = branchRatio - easyPenalty - mechanicalPenalty;
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = route;
+    }
+  }
+
+  // 万一どの候補も作れなかった場合の保険
+  const route = best || buildRoute(cfg.rows, cfg.cols, cfg.targetLength);
+
   ROWS = cfg.rows;
   COLS = cfg.cols;
   cells = route;
