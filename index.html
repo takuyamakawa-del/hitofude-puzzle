@@ -177,9 +177,9 @@
 <body>
 <div id="app">
   <header>
-    <span class="spacer"></span>
+    <button id="restartBtn" class="icon-btn" aria-label="レベル1からやり直す">⏮</button>
     <h1 id="levelLabel">LEVEL 1</h1>
-    <button id="resetBtn" class="icon-btn" aria-label="最初からやり直す">↻</button>
+    <button id="resetBtn" class="icon-btn" aria-label="このレベルをやり直す">↻</button>
   </header>
 
   <div id="progress">
@@ -986,12 +986,22 @@ canvas.addEventListener("pointercancel", stopDragging);
 canvas.addEventListener("pointerleave", stopDragging);
 
 // ===== 7. やり直しボタン =====
+// ・↻ボタン    → 今のレベルの線だけを最初からやり直す
+// ・⏮ボタン    → 確認してから、レベル1まで進行状況ごと戻す
 document.getElementById("resetBtn").addEventListener("click", () => {
   if (cleared) return;  // クリア画面が出ている間は無効
   path = [start];
   hintCell = null;
   draw();
   updateProgress(path.length);
+});
+
+document.getElementById("restartBtn").addEventListener("click", () => {
+  const ok = window.confirm("レベル1からやり直しますか?\n(これまでの進行状況が消えます)");
+  if (!ok) return;
+  level = 1;
+  bestLevel = 1;
+  startLevel(1);
 });
 
 // ===== 8. 次のレベルへ =====
