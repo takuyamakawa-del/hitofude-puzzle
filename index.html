@@ -310,19 +310,32 @@ function tryBuildRoute(rows, cols, targetLength) {
       .filter(([r, c]) => !visited.has(r + "," + c));
 
     candidates = shuffle(candidates).map(([r, c]) => {
-      const freeExits = neighborsOf(r, c, rows, cols)
+      const nbrs = neighborsOf(r, c, rows, cols);
+      const freeExits = nbrs
         .filter(([nr, nc]) => !visited.has(nr + "," + nc)).length;
       const opensBlock = makesOpenBlock(r, c, visited);
       // 出口がゼロの候補だけ「危険」扱いにする(それ以外は出口の数で差をつけない)
       const deadEndRisk = freeExits === 0 ? 1 : 0;
-      return { r, c, freeExits, opensBlock, deadEndRisk };
+      // 今いるマス以外に、すでに通ったマスへ何個隣接しているか。
+      // これが多い候補を選ぶと、道がすぐ近くで折り返して自分自身に
+      // 寄り添うようになり、後で「分かれ道」になりやすい。逆にこれを
+      // 考えないと、道はどんどん未開拓の方へ素直に伸びていくだけになり、
+      // 分かれ道のない、ただ長いだけの「一本道」区間ができやすかった。
+      const visitedNeighborCount = nbrs.filter(([nr, nc]) => {
+        if (nr === last.r && nc === last.c) return false;
+        return visited.has(nr + "," + nc);
+      }).length;
+      return { r, c, freeExits, opensBlock, deadEndRisk, visitedNeighborCount };
     });
 
-    // 優先順位: ①部屋を作らない ②手詰まり確定を避ける、の順で選ぶ
-    // (それ以外はシャッフルされた順のまま=枝分かれの余地を残す)
+    // 優先順位: ①部屋を作らない ②手詰まり確定を避ける ③すでに通った
+    // マスの近くを通る(=分かれ道の種をまく)、の順で選ぶ
     candidates.sort((a, b) => {
       if (a.opensBlock !== b.opensBlock) return a.opensBlock ? 1 : -1;
       if (a.deadEndRisk !== b.deadEndRisk) return a.deadEndRisk - b.deadEndRisk;
+      if (a.visitedNeighborCount !== b.visitedNeighborCount) {
+        return b.visitedNeighborCount - a.visitedNeighborCount;
+      }
       return 0;
     });
 
@@ -352,18 +365,21 @@ function buildRoute(rows, cols, targetLength) {
 
 // レベルの数字から、盤面の大きさと、通るマス数の目安を決める。
 // 詰め込みすぎると大きな「部屋」ができてしまうため、穴の割合はいつも
-// 45〜51%あたりに保ち、代わりに盤面の大きさを4×4→13×13まで
-// しっかり大きくしていくことで、難しさを積み上げていく。
+// 48〜56%あたりに保ち、代わりに盤面の大きさを4×4→15×15まで
+// しっかり大きくしていくことで、難しさを積み上げていく
+// (以前は13×13・51%が上限だったが、「レベルが上がってもマス目が
+// 増えるだけで一本道感が変わらない」という指摘を受け、盤面の上限と
+// 詰め込み具合の両方を少し引き上げた)。
 function levelConfig(lv) {
-  const size = Math.min(4 + Math.floor((lv - 1) / 2), 13);  // 4→13まで、2レベルごとに1つ大きく
+  const size = Math.min(4 + Math.floor((lv - 1) / 2), 14);  // 4→14まで、2レベルごとに1つ大きく
   const maxCells = size * size;
   let fillRatio;
   if (lv <= 2) {
     fillRatio = 1;
   } else if (lv <= 20) {
-    fillRatio = Math.max(0.45, 1 - 0.09 * (lv - 2));
+    fillRatio = Math.max(0.48, 1 - 0.09 * (lv - 2));
   } else {
-    fillRatio = Math.min(0.51, 0.45 + 0.002 * (lv - 20));
+    fillRatio = Math.min(0.54, 0.48 + 0.0015 * (lv - 20));
   }
   const targetLength = Math.max(Math.round(maxCells * fillRatio), 6);
   return { rows: size, cols: size, targetLength };
@@ -384,6 +400,28 @@ function branchRatioOf(route, rows, cols) {
     if (deg >= 3) branchCount++;
   }
   return branchCount / route.length;
+}
+
+// 盤面の中に、「分かれ道のない、まっすぐな一本道」の区間がどれくらい
+// 長く続くかを調べる。マスを道順にたどっていき、分かれ道でない
+// (通れる方向が2つ以下の)マスが連続する最長の長さを返す。
+// これが長い盤面ほど、「せっかく盤面全体の分かれ道の割合(branchRatio)は
+// 悪くなくても、部分的にはただの一本道が長く残っている」ということになる。
+function longestCorridorRun(route, rows, cols) {
+  const region = new Set(route.map(p => p.r + "," + p.c));
+  let longest = 0;
+  let current = 0;
+  for (const p of route) {
+    const deg = neighborsOf(p.r, p.c, rows, cols)
+      .filter(([r, c]) => region.has(r + "," + c)).length;
+    if (deg <= 2) {
+      current++;
+      if (current > longest) longest = current;
+    } else {
+      current = 0;
+    }
+  }
+  return longest;
 }
 
 // 「先読みをせず、行けるマスにランダムに進むだけで、何%の確率で最後まで
@@ -468,9 +506,23 @@ function targetDifficulty(lv) {
   return Math.max(0.05, 0.9 - 0.045 * (lv - 3));
 }
 
+// レベルが上がるほど、「分かれ道マスの割合」の最低ラインを引き上げていく。
+// これがないと、マス数だけ増えて「長い一本道がつながっただけ」の盤面でも
+// 採用されてしまうことがあった。下回る候補は score を大きく下げて避ける。
+function minBranchRatioFor(lv) {
+  return Math.min(0.5, 0.08 + 0.01 * lv);
+}
+
+// 「分かれ道のない一本道」が連続してよい長さの上限。レベルが上がっても
+// あまり大きくしすぎない(盤面が大きくなったからといって一本道区間が
+// 長くなってよいわけではない、という指摘への対応)。
+function maxCorridorRunFor(lv) {
+  return Math.min(9, 4 + Math.floor(lv / 8));
+}
+
 // 何個の候補を作って比べるか。多いほど良い盤面が選べるが、時間もかかる。
 function candidateCountFor(lv) {
-  return lv <= 5 ? 4 : 6;
+  return lv <= 5 ? 5 : 8;
 }
 
 // レベルに応じた盤面を1面ぶん作る
@@ -483,6 +535,8 @@ let goal = null;
 function generateLevel(lv) {
   const cfg = levelConfig(lv);
   const target = targetDifficulty(lv);
+  const minBranchRatio = minBranchRatioFor(lv);
+  const maxCorridorRun = maxCorridorRunFor(lv);
   const numCandidates = candidateCountFor(lv);
   const SIM_TRIALS = 25;          // 候補を比べるための試行回数(多すぎると遅くなる)
   const TIME_BUDGET_MS = 300;     // 盤面選びに使ってよい時間の目安
@@ -499,13 +553,20 @@ function generateLevel(lv) {
     if (!route) continue;
 
     const branchRatio = branchRatioOf(route, cfg.rows, cfg.cols);
+    const corridorRun = longestCorridorRun(route, cfg.rows, cfg.cols);
     const naiveRate = simulateNaiveSuccess(route, cfg.rows, cfg.cols, SIM_TRIALS);
     const easyPenalty = naiveRate > target ? (naiveRate - target) * 3 : 0;
     // レベル4以降で、壁づたい法などの機械的な解き方が通用してしまう盤面は、
     // 分かれ道が多く見えても大きく減点して避ける(レベル1〜3はごく小さい
     // 盤面で、機械的に解けても問題にならないためチェックを省く)。
     const mechanicalPenalty = (lv > 3 && isMechanicallySolvable(route, cfg.rows, cfg.cols)) ? 5 : 0;
-    const score = branchRatio - easyPenalty - mechanicalPenalty;
+    // 分かれ道の割合がレベルなりの最低ラインに届いていない候補も避ける。
+    // (「マス数は増えたのに一本道の印象は変わらない」を防ぐための条件)
+    const belowFloorPenalty = branchRatio < minBranchRatio ? (minBranchRatio - branchRatio) * 4 : 0;
+    // 盤面全体の平均(branchRatio)が良くても、部分的に長い一本道が
+    // 残っていることがあるため、そこも別枠で減点する。
+    const corridorPenalty = corridorRun > maxCorridorRun ? (corridorRun - maxCorridorRun) * 0.3 : 0;
+    const score = branchRatio - easyPenalty - mechanicalPenalty - belowFloorPenalty - corridorPenalty;
 
     if (score > bestScore) {
       bestScore = score;
