@@ -306,17 +306,24 @@ function buildRoute(rows, cols, targetLength) {
 }
 
 // レベルの数字から、盤面の大きさと、通るマス数の目安を決める
-// ・序盤: 4×4くらいで、穴なし
-// ・中盤: 盤面が大きくなり、通らないマス(穴)が増える
-// ・終盤: マス数が多く、ルートも複雑になる
-//
-// 補足: マスをすき間なく敷き詰めるほど、正解ルートが「実質1本道」に近づき
-// 難しくなりすぎる(遠回りできる余地がなくなる)ため、穴の割合が72%を
-// 下回らない(=最大でも28%は穴にする)ようにして、行き詰まりにくくしている。
+// ・序盤(〜lv3):    4×4くらいで、穴なし
+// ・中盤(〜lv25):   盤面が10×10まで大きくなりながら、穴の割合を増やしていく
+//                   (すき間なく敷き詰めると正解ルートが「実質1本道」になり
+//                    難しくなりすぎるため、穴の割合が72%を下回らないようにする)
+// ・終盤(lv26〜):   盤面の大きさは10×10で止め、代わりに穴を少しずつ減らして
+//                   (=すき間を減らして)いき、レベルが上がってもずっと
+//                   手応えが続くようにする(90%までで、完全な1本道にはしない)
 function levelConfig(lv) {
-  const size = Math.min(4 + Math.floor((lv - 1) / 4), 8);  // 4→8まで、4レベルごとに1つ大きく
+  const size = Math.min(4 + Math.floor((lv - 1) / 4), 10);  // 4→10まで、4レベルごとに1つ大きく
   const maxCells = size * size;
-  const fillRatio = lv <= 3 ? 1 : Math.max(0.72, 1 - 0.06 * (lv - 3));
+  let fillRatio;
+  if (lv <= 3) {
+    fillRatio = 1;
+  } else if (lv <= 25) {
+    fillRatio = Math.max(0.72, 1 - 0.06 * (lv - 3));
+  } else {
+    fillRatio = Math.min(0.9, 0.72 + 0.004 * (lv - 25));
+  }
   const targetLength = Math.max(Math.round(maxCells * fillRatio), 6);
   return { rows: size, cols: size, targetLength };
 }
@@ -597,6 +604,7 @@ function handlePointer(x, y) {
 //
 // 見つかった続きの1マス目を、ヒントとして光らせる。
 // 見つからなければ、今の道のままではクリアできない(戻ってやり直す必要がある)。
+// 戻り値: 続きの道順の配列 / 見つからなければ null / 時間切れなら "TIMEOUT"
 function findSolutionFromHere() {
   const head = path[path.length - 1];
 
@@ -613,8 +621,17 @@ function findSolutionFromHere() {
     return null;
   }
 
+  // 近道: 今までの道が、面を作ったときの正解ルートとそのまま一致しているなら、
+  // 探すまでもなく次の1マスはすぐに分かる(このルートは必ずクリアできる)。
+  const followsGeneratedRoute = path.every((p, i) => sameCell(p, cells[i]));
+  if (followsGeneratedRoute) {
+    return [cells[path.length]];
+  }
+
   let steps = 0;
-  const STEP_LIMIT = 400000;  // 探索に時間をかけすぎないための上限
+  const startTime = Date.now();
+  const TIME_LIMIT_MS = 400;  // これ以上は時間をかけすぎと判断して切り上げる
+  let timedOut = false;
   const order = [];  // 見つかった続きの道順
 
   function degreeIfVisited(cell, remainingSet) {
@@ -648,7 +665,13 @@ function findSolutionFromHere() {
   }
 
   function dfs(current, remainingSet) {
-    if (steps++ > STEP_LIMIT) return false;
+    if (timedOut) return false;
+    steps++;
+    // 時間のチェックは少し間引く(毎回だと、それ自体が遅くなるため)
+    if (steps % 400 === 0 && Date.now() - startTime > TIME_LIMIT_MS) {
+      timedOut = true;
+      return false;
+    }
     if (remainingSet.size === 0) return sameCell(current, goal);
 
     let candidates = neighborsOf(current.r, current.c, ROWS, COLS)
@@ -681,6 +704,7 @@ function findSolutionFromHere() {
   }
 
   const found = dfs(head, remaining);
+  if (timedOut) return "TIMEOUT";
   return found ? order : null;
 }
 
@@ -705,7 +729,12 @@ hintBtn.addEventListener("click", () => {
 
   setTimeout(() => {
     const solution = findSolutionFromHere();
-    if (!solution) {
+    if (solution === "TIMEOUT") {
+      // 盤面が複雑で、時間内に答えを見つけられなかった。
+      // (この場合、本当に詰んでいるとは限らないので「クリアできません」とは言わない)
+      showToast("盤面が複雑で、ヒントの計算に時間がかかっています。少し戻ってから試してみてください。");
+      hintCell = null;
+    } else if (!solution) {
       showToast("ここから先はクリアできません。戻ってやり直しましょう。");
       hintCell = null;
     } else if (solution.length === 0) {
